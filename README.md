@@ -92,21 +92,6 @@ Set these in the Render Dashboard:
 5. Add the Environment Variables listed above.
 6. Click **Deploy**.
 
----
-
-## 📂 Project Structure
-
-```text
-├── app.py              # Flask Backend (Auth, Logic, OCR, PDF)
-├── Dashboard.tsx       # React Pro Dashboard UI
-├── Dockerfile          # Multi-stage build (Node + Python + Tesseract)
-├── requirements.txt    # Python dependencies
-├── package.json        # Node dependencies & scripts
-├── vite.config.ts      # Vite configuration & Proxy setup
-└── tailwind.config.js  # Tailwind v4 theme configuration
-```
-
----
 
 ## ⚖️ License
 Distributed under the MIT License. See `LICENSE` for more information.
