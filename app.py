@@ -24,7 +24,6 @@ load_dotenv()
 app = Flask(__name__, static_folder='dist', static_url_path='/')
 CORS(app)
 
-# --- Configuration ---
 app.config['SECRET_KEY'] = os.getenv('JWT_SECRET', 'secret')
 MONGODB_URI = os.getenv('MONGODB_URI')
 
@@ -37,11 +36,9 @@ except:
     db = client['masterpdf']
 fs = gridfs.GridFS(db)
 
-# Temp folder for processing
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# --- Auth Middleware ---
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -55,7 +52,6 @@ def token_required(f):
         return f(current_user, *args, **kwargs)
     return decorated
 
-# --- Auth Routes ---
 @app.route('/api/auth/register', methods=['POST'])
 def register():
     data = request.json
@@ -76,7 +72,6 @@ def login():
         return jsonify({"token": token, "user": {"username": user['username'], "email": user['email']}})
     return jsonify({"error": "Invalid credentials"}), 401
 
-# --- Conversion Route ---
 @app.route('/api/convert', methods=['POST'])
 @token_required
 def convert(current_user):
@@ -87,16 +82,17 @@ def convert(current_user):
 
         output_buffer = io.BytesIO()
         mime = files[0].content_type
-        detected_type = 'merge' if 'pdf' in mime else ('image' if 'image' in mime else 'text')
+        # AUTO DETECT TYPE
+        detected_type = 'Merge PDF' if 'pdf' in mime else ('Image to PDF' if 'image' in mime else 'Text to PDF')
 
-        if detected_type == 'merge':
+        if 'pdf' in mime:
             merger = PdfWriter()
             for f in files: merger.append(f)
             merger.write(output_buffer)
         else:
             c = canvas.Canvas(output_buffer, pagesize=letter)
             for f in files:
-                if detected_type == 'image':
+                if 'image' in mime:
                     img = Image.open(f).convert('RGB')
                     temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{f.filename}")
                     img.save(temp_path)
@@ -119,12 +115,10 @@ def convert(current_user):
                     c.showPage()
             c.save()
 
-        # Save to GridFS
         filename = f"conv_{int(datetime.datetime.now().timestamp())}.pdf"
         output_buffer.seek(0)
         file_id = fs.put(output_buffer.getvalue(), filename=filename)
 
-        # Log History
         db.conversions.insert_one({
             "userId": current_user['_id'], "fileName": filename, "fileType": detected_type,
             "numFiles": len(files), "status": "success", "convertTime": datetime.datetime.utcnow(),
@@ -138,17 +132,25 @@ def convert(current_user):
 @app.route('/api/history', methods=['GET'])
 @token_required
 def get_history(current_user):
-    data = list(db.conversions.find({"userId": current_user['_id']}).sort("convertTime", -1))
-    for item in data:
+    # Fetch data and convert ObjectIds/Dates to Strings for JSON
+    raw_data = list(db.conversions.find({"userId": current_user['_id']}).sort("convertTime", -1))
+    clean_data = []
+    for item in raw_data:
         item['_id'] = str(item['_id'])
         item['userId'] = str(item['userId'])
-    return jsonify(data)
+        item['fileId'] = str(item['fileId'])
+        item['convertTime'] = item['convertTime'].isoformat()
+        if item.get('downloadTime'):
+            item['downloadTime'] = item['downloadTime'].isoformat()
+        clean_data.append(item)
+    return jsonify(clean_data)
 
 @app.route('/api/stats', methods=['GET'])
 @token_required
 def get_stats(current_user):
     pipe = [{"$match": {"userId": current_user['_id']}}, {"$group": {"_id": None, "total": {"$sum": 1}, 
-            "success": {"$sum": 1}, "failed": {"$sum": 0}}}]
+            "success": {"$sum": {"$cond": [{"$eq": ["$status", "success"]}, 1, 0]}}, 
+            "failed": {"$sum": {"$cond": [{"$eq": ["$status", "failed"]}, 1, 0]}} }}]
     res = list(db.conversions.aggregate(pipe))
     return jsonify(res[0] if res else {"total": 0, "success": 0, "failed": 0})
 
@@ -157,7 +159,8 @@ def download(filename):
     conv = db.conversions.find_one({"fileName": filename})
     if not conv: return "Not Found", 404
     db.conversions.update_one({"_id": conv['_id']}, {"$inc": {"downloadCount": 1}, "$set": {"downloadTime": datetime.datetime.utcnow()}})
-    return send_file(io.BytesIO(fs.get(conv['fileId']).read()), mimetype='application/pdf', as_attachment=True, download_name=filename)
+    file_data = fs.get(ObjectId(conv['fileId']))
+    return send_file(io.BytesIO(file_data.read()), mimetype='application/pdf', as_attachment=True, download_name=filename)
 
 @app.route('/api/report', methods=['GET'])
 @token_required
@@ -166,22 +169,28 @@ def report(current_user):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
-    elements = [Paragraph(f"MasterPDF Activity Report: {current_user['username']}", styles['Title']), Spacer(1, 12)]
+    elements = [Paragraph(f"MasterPDF History Report: {current_user['username']}", styles['Title']), Spacer(1, 12)]
     
-    data = [["File (ID)", "Type", "Original Files", "Converted At", "DLs"]]
+    base_url = request.host_url.rstrip('/')
+    data = [["File", "Type", "Original Files", "Downloads", "Link"]]
     for i in items:
-        data.append([i['fileName'], i['fileType'], "\n".join(i.get('originalFileNames', [])[:2]), 
-                    i['convertTime'].strftime('%Y-%m-%d'), str(i['downloadCount'])])
+        full_link = f"{base_url}{i['fileUrl']}"
+        data.append([
+            i['fileName'], 
+            i['fileType'], 
+            "\n".join(i.get('originalFileNames', [])[:3]), 
+            str(i['downloadCount']),
+            Paragraph(f'<a href="{full_link}" color="blue">Download</a>', styles['Normal'])
+        ])
     
-    t = Table(data, colWidths=[100, 50, 200, 80, 40])
+    t = Table(data, colWidths=[100, 80, 180, 60, 80])
     t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.black), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),
                            ('GRID',(0,0),(-1,-1),0.5,colors.grey), ('FONTSIZE',(0,0),(-1,-1),7), ('VALIGN',(0,0),(-1,-1),'TOP')]))
     elements.append(t)
     doc.build(elements)
     buffer.seek(0)
-    return send_file(buffer, mimetype='application/pdf', as_attachment=True, download_name="Report.pdf")
+    return send_file(buffer, mimetype='application/pdf', as_attachment=True, download_name="Full_History_Report.pdf")
 
-# --- Frontend ---
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve(path):
