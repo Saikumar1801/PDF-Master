@@ -1,0 +1,11 @@
+flask
+flask-cors
+pymongo[srv]
+pyjwt
+bcrypt
+python-dotenv
+pypdf
+reportlab
+pytesseract
+Pillow
+gunicorn
